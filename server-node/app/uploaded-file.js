@@ -5,7 +5,10 @@ import path from 'node:path';
 
 import config from './config.js';
 
-const storageFolder = path.join(os.tmpdir(), '.cloud-clipboard-storage');
+const storageFolder = config.server.storageDir || path.join(os.tmpdir(), '.cloud-clipboard-storage');
+if (!fs.existsSync(storageFolder)) {
+    fs.mkdirSync(storageFolder);
+}
 
 class UploadedFile {
     /**
@@ -48,7 +51,7 @@ class UploadedFile {
     }
 
     remove() {
-        this.writePromise = this.writePromise.then(() => fs.promises.rm(this.path));
+        this.writePromise = this.writePromise.then(() => fs.promises.rm(this.path)).catch(() => {});
         return this.writePromise;
     }
 }
@@ -64,12 +67,17 @@ setInterval(() => {
         if (v.expireTime < currentTime) toRemove.push(k);
     });
     toRemove.forEach(e => {
-        uploadFileMap.get(e).remove();
-        uploadFileMap.delete(e);
+        try {
+            uploadFileMap.get(e).remove();
+            uploadFileMap.delete(e);
+        } catch (err) {
+
+        }
     });
 }, 1800000);
 
 export {
     UploadedFile,
     uploadFileMap,
+    storageFolder,
 };

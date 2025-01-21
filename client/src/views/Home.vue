@@ -20,9 +20,9 @@
             right
             fixed
             direction="top"
-            open-on-hover
             transition="scale-transition"
             class="hidden-md-and-up"
+            style="transform:translateY(-64px)"
         >
             <template v-slot:activator>
                 <v-btn
@@ -34,10 +34,10 @@
                     <v-icon>{{mdiPlus}}</v-icon>
                 </v-btn>
             </template>
-            <v-btn fab dark small color="primary" @click="dialog = true; mode = 'file'">
+            <v-btn fab dark small color="primary" @click="dialog = true; mode = 'file'; setTimeout(() => $refs.dialogFile.focus(), 300)">
                 <v-icon>{{mdiFileDocumentOutline}}</v-icon>
             </v-btn>
-            <v-btn fab dark small color="primary" @click="dialog = true; mode = 'text'">
+            <v-btn fab dark small color="primary" @click="dialog = true; mode = 'text'; setTimeout(() => $refs.dialogText.focus(), 300)">
                 <v-icon>{{mdiText}}</v-icon>
             </v-btn>
         </v-speed-dial>
@@ -59,8 +59,8 @@
                 </v-toolbar>
                 <v-card-text class="px-4">
                     <div class="my-4">
-                        <send-text v-if="mode === 'text'"></send-text>
-                        <send-file v-if="mode === 'file'"></send-file>
+                        <send-text ref="dialogText" v-if="mode === 'text'"></send-text>
+                        <send-file ref="dialogFile" v-if="mode === 'file'"></send-file>
                     </div>
                 </v-card-text>
             </v-card>
@@ -97,6 +97,24 @@ export default {
             mdiText,
             mdiClose,
         };
+    },
+    methods: {
+        closeDialog() {
+            this.dialog = false;
+        },
+        setTimeout(f, t) {
+            return setTimeout(f, t);
+        },
+    },
+    watch: {
+        dialog(newval) {
+            if (newval) {
+                history.pushState(null, null, location.href);
+                addEventListener('popstate', this.closeDialog);
+            } else {
+                removeEventListener('popstate', this.closeDialog);
+            }
+        },
     },
 }
 </script>
