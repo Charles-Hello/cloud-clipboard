@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import KoaRouter from '@koa/router';
 import { koaBody } from 'koa-body';
 import koaWebsocket from 'koa-websocket';
@@ -9,17 +10,33 @@ import messageQueue from './message.js';
 import {
     UploadedFile,
     uploadFileMap,
+    storageFolder,
 } from './uploaded-file.js';
 import {
     writeJSON,
     wsBoardcast,
 } from './util.js';
 
-const router = new KoaRouter;
+const historyPath = config.server.historyFile || path.join(process.cwd(), 'history.json');
+
+const saveHistory = () => fs.promises.writeFile(historyPath, JSON.stringify({
+    file: Array.from(uploadFileMap.values()).filter(e => e.expireTime > Date.now() / 1e3).map(e => ({
+        name: e.name,
+        uuid: e.uuid,
+        size: e.size,
+        uploadTime: e.uploadTime,
+        expireTime: e.expireTime,
+    })),
+    receive: messageQueue.queue.filter(e => e.event === 'receive').filter(e => e.data.type !== 'file' || e.data.expire > Date.now() / 1e3).map(e => e.data),
+}));
+
+const router = new KoaRouter({
+    prefix: config.server.prefix,
+});
 
 router.get('/server', async ctx => {
     ctx.body = {
-        'server': `ws${ctx.request.protocol === 'https' ? 's' : ''}://${ctx.request.host}/push`,
+        'server': `ws://${ctx.request.host}${config.server.prefix}/push`,
         'auth': !!config.server.auth,
     };
 });
@@ -27,7 +44,11 @@ router.get('/server', async ctx => {
 router.post(
     '/text',
     koaBody({
-        enableTypes: ['text'],
+        multipart: false,
+        urlencoded: false,
+        text: true,
+        json: false,
+        textLimit: 1048576,
     }),
     async ctx => {
         /** @type {String} */
@@ -47,14 +68,16 @@ router.post(
             data: {
                 id: messageQueue.counter,
                 type: 'text',
+                room: ctx.query.room,
                 content: body,
             },
         };
         messageQueue.enqueue(message);
         /** @type {koaWebsocket.App<Koa.DefaultState, Koa.DefaultContext>} */
         const app = ctx.app;
-        wsBoardcast(app.ws, JSON.stringify(message));
+        wsBoardcast(app.ws, JSON.stringify(message), ctx.query.room);
         writeJSON(ctx);
+        saveHistory();
     }
 );
 
@@ -66,13 +89,39 @@ router.delete('/revoke/:id(\\d+)', async ctx => {
     messageQueue.queue.splice(messageQueue.queue.findIndex(e => e.data.id === id), 1);
     /** @type {koaWebsocket.App<Koa.DefaultState, Koa.DefaultContext>} */
     const app = ctx.app;
-    wsBoardcast(app.ws, JSON.stringify({
-        event: 'revoke',
-        data: {
-            id,
-        },
-    }));
+    wsBoardcast(
+        app.ws,
+        JSON.stringify({
+            event: 'revoke',
+            data: {
+                id,
+                room: ctx.query.room,
+            },
+        }),
+        ctx.query.room,
+    );
     writeJSON(ctx);
+    saveHistory();
+});
+
+router.delete('/revoke/all', async ctx => {
+    const revoked = messageQueue.queue.filter(e => e.data.room === ctx.query.room);
+    messageQueue.queue = messageQueue.queue.filter(e => e.data.room !== ctx.query.room);
+    /** @type {koaWebsocket.App<Koa.DefaultState, Koa.DefaultContext>} */
+    const app = ctx.app;
+    revoked.forEach(e => wsBoardcast(
+        app.ws,
+        JSON.stringify({
+            event: 'revoke',
+            data: {
+                id: e.data.id,
+                room: ctx.query.room,
+            },
+        }),
+        ctx.query.room,
+    ));
+    writeJSON(ctx);
+    saveHistory();
 });
 
 router.post(
@@ -121,8 +170,9 @@ router.post('/upload/finish/:uuid([0-9a-f]{32})', async ctx => {
         const message = {
             event: 'receive',
             data: {
-                id: messageQueue.counter,
+                id: -1, // 在生成缩略图之后进队列之前再设定
                 type: 'file',
+                room: ctx.query.room,
                 name: file.name,
                 size: file.size,
                 cache: file.uuid,
@@ -140,17 +190,19 @@ router.post('/upload/finish/:uuid([0-9a-f]{32})', async ctx => {
                     withoutEnlargement: true,
                 });
             }
-            message.data.thumbnail = 'data:image/jpeg;base64,' + (await img.toFormat('jpg', {
+            message.data.thumbnail = 'data:image/webp;base64,' + (await img.toFormat('webp', {
                 quality: 70,
-                optimizeScans: true,
+                smartSubsample: true,
             }).toBuffer()).toString('base64');
         } catch {}
+        message.data.id = messageQueue.counter;
         messageQueue.enqueue(message);
 
         /** @type {koaWebsocket.App<Koa.DefaultState, Koa.DefaultContext>} */
         const app = ctx.app;
-        wsBoardcast(app.ws, JSON.stringify(message));
+        wsBoardcast(app.ws, JSON.stringify(message), ctx.query.room);
         writeJSON(ctx);
+        saveHistory();
     } catch (error) {
         writeJSON(ctx, 400, error.message || error);
     }
@@ -161,8 +213,38 @@ router.get('/file/:uuid([0-9a-f]{32})', async ctx => {
     if (!file || Date.now() / 1000 > file.expireTime || !fs.existsSync(file.path)) {
         return ctx.status = 404;
     }
-    ctx.attachment(encodeURIComponent(file.name));
-    ctx.body = fs.createReadStream(file.path);
+    ctx.attachment(file.name, {type: 'inline'});
+    const fileSize = (await fs.promises.stat(file.path)).size;
+    // https://github.com/xtx1130/koa-partial-content/blob/master/index.js
+    if (ctx.header.range && file.name.match(/\.(mp3|mp4|flv|webm|ogv|mpg|mpg|wav|ogg|opus|m4a|flac)$/gi)) {
+        try {
+            const m = /^bytes=(\d+)-(\d*)$/.exec(ctx.request.header.range || 'bytes=0-');
+            if (!m) throw new Error;
+            const rangeStart = parseInt(m[1]);
+            const rangeEnd = parseInt(m[2] || (fileSize - 1));
+            ctx.set('Accept-Range', 'bytes');
+            if (rangeEnd > fileSize - 1 || rangeEnd > fileSize - 1) {
+                throw new Error;
+            } else {
+                ctx.status = 206;
+                ctx.set('Content-Range', `bytes ${rangeStart}-${rangeEnd}/${fileSize}`);
+                await new Promise(resolve => {
+                    const rs = fs.createReadStream(file.path, {
+                        start: rangeStart,
+                        end: rangeEnd,
+                    });
+                    rs.on('open', () => rs.pipe(ctx.res));
+                    rs.on('end', resolve);
+                    rs.on('error', () => resolve(ctx.throw(500)));
+                });
+            }
+        } catch (err) {
+            ctx.throw(416);
+            ctx.set('Content-Range', `bytes */${fileSize}`);
+        }
+    } else {
+        ctx.body = fs.createReadStream(file.path);
+    }
 });
 
 router.delete('/file/:uuid([0-9a-f]{32})', async ctx => {
@@ -171,7 +253,58 @@ router.delete('/file/:uuid([0-9a-f]{32})', async ctx => {
         return writeJSON(ctx, 404);
     }
     file.remove();
+    uploadFileMap.delete(ctx.params.uuid);
     writeJSON(ctx);
+    saveHistory();
 });
+
+if (fs.existsSync(historyPath)) {
+    /**
+     * @type {{
+     *  file: {
+     *      name: String,
+     *      uuid: String,
+     *      size: Number,
+     *      uploadTime: Number,
+     *      expireTime: Number,
+     *  }[],
+     *  receive: ({
+     *      type: 'text',
+     *      room: String,
+     *      content: String,
+     *  }|{
+     *      type: 'file',
+     *      room: String,
+     *      name: String,
+     *      size: Number,
+     *      cache: String,
+     *      expire: Number,
+     *  })[],
+     * }}
+     */
+    const history = JSON.parse(fs.readFileSync(historyPath, {encoding: 'utf-8'}));
+    const currentTime = Math.round(Date.now() / 1000);
+    history.file.forEach(e => {
+        if (!fs.existsSync(path.join(storageFolder, e.uuid))) return;
+        if (e.expireTime < currentTime) return fs.rmSync(path.join(storageFolder, e.uuid));
+        const f = new UploadedFile(e.name);
+        f.uuid = e.uuid;
+        f.path = path.join(storageFolder, f.uuid);
+        f.size = e.size;
+        f.uploadTime = e.uploadTime;
+        f.expireTime = e.expireTime;
+        uploadFileMap.set(e.uuid, f);
+    });
+    history.receive.forEach(e => {
+        if (e.type === 'file' && !uploadFileMap.has(e.cache)) return;
+        messageQueue.enqueue({
+            event: 'receive',
+            data: {
+                ...e,
+                id: messageQueue.counter,
+            },
+        });
+    });
+}
 
 export default router;

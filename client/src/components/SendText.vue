@@ -2,6 +2,7 @@
     <div>
         <div class="headline text--primary mb-4">发送文本</div>
         <v-textarea
+            ref="textarea"
             no-resize
             outlined
             dense
@@ -25,8 +26,20 @@
 export default {
     name: 'send-text',
     methods: {
+        focus() {
+            this.$refs.textarea.focus();
+        },
         send() {
-            this.$http.post('/text', this.$root.send.text, {headers: {'Content-Type': 'text/plain'}}).then(response => {
+            this.$http.post(
+                'text',
+                this.$root.send.text,
+                {
+                    params: new URLSearchParams([['room', this.$root.room]]),
+                    headers: {
+                        'Content-Type': 'text/plain',
+                    },
+                },
+            ).then(response => {
                 this.$toast('发送成功');
                 this.$root.send.text = '';
             }).catch(error => {

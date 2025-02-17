@@ -1,6 +1,6 @@
 {
   "name": "cloud-clipboard-server-node",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -10,13 +10,14 @@
     "start": "node main.js"
   },
   "dependencies": {
-    "@koa/router": "^12.0.0",
-    "koa": "^2.13.4",
+    "@koa/router": "^13.1.0",
+    "koa": "^2.15.3",
     "koa-body": "^6.0.1",
-    "koa-compress": "^5.1.0",
+    "koa-compress": "^5.1.1",
+    "koa-mount": "^4.0.0",
     "koa-static": "^5.0.0",
     "koa-websocket": "^7.0.0",
-    "sharp": "^0.31.1",
-    "ua-parser-js": "^1.0.32"
+    "sharp": "^0.33.5",
+    "ua-parser-js": "2.0.0"
   }
 }

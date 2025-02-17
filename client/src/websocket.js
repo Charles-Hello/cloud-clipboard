@@ -5,10 +5,16 @@ export default {
             websocketConnecting: false,
             authCode: localStorage.getItem('auth') || '',
             authCodeDialog: false,
+            room: localStorage.getItem('room') || '',
+            roomInput: '',
+            roomDialog: false,
             retry: 0,
             event: {
                 receive: data => {
                     this.$root.received.unshift(data);
+                },
+                receiveMulti: data => {
+                    this.$root.received.unshift(...Array.from(data).reverse());
                 },
                 revoke: data => {
                     let index = this.$root.received.findIndex(e => e.id === data.id);
@@ -46,27 +52,33 @@ export default {
                 dismissable: false,
                 timeout: 0,
             });
-            this.$http.get('/server').then(response => {
+            this.$http.get('server').then(response => {
                 if (this.authCode) localStorage.setItem('auth', this.authCode);
+                this.room = this.room.trim();
+                localStorage.setItem('room', this.room);
                 return new Promise((resolve, reject) => {
-                    let ws;
-                    if (!response.data.auth) {
-                        ws = new WebSocket(response.data.server);
-                    } else if (this.authCode) {
-                        ws = new WebSocket(`${response.data.server}?auth=${encodeURIComponent(this.authCode)}`);
-                    } else {
-                        this.authCodeDialog = true;
-                        return;
+                    const wsUrl = new URL(response.data.server);
+                    wsUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    wsUrl.port = location.port;
+                    if (response.data.auth) {
+                        if (this.authCode) {
+                            wsUrl.searchParams.set('auth', this.authCode);
+                        } else {
+                            this.authCodeDialog = true;
+                            return;
+                        }
                     }
-                    ws.onopen = () => {resolve(ws)};
+                    wsUrl.searchParams.set('room', this.room);
+                    const ws = new WebSocket(wsUrl);
+                    ws.onopen = () => resolve(ws);
                     ws.onerror = reject;
                 });
-            }).then(ws => {
+            }).then((/** @type {WebSocket} */ ws) => {
                 this.websocketConnecting = false;
                 this.retry = 0;
                 this.received = [];
                 this.$toast('连接服务器成功');
-                setInterval(() => {ws.send('')}, 60000);
+                setInterval(() => {ws.send('')}, 30000);
                 ws.onclose = () => {this.failure()};
                 ws.onmessage = e => {
                     try {
@@ -80,6 +92,13 @@ export default {
                 this.websocketConnecting = false;
                 this.failure();
             });
+        },
+        disconnect() {
+            this.websocketConnecting = false;
+            this.websocket.onclose = () => {};
+            this.websocket.close();
+            this.websocket = null;
+            this.$root.device = [];
         },
         failure() {
             this.websocket = null;

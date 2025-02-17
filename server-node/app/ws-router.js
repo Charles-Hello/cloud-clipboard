@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import KoaRouter from '@koa/router';
 import koaWebsocket from 'koa-websocket';
-import uaParser from 'ua-parser-js';
+import { UAParser } from 'ua-parser-js';
 
 import config from './config.js';
 import messageQueue from './message.js';
@@ -14,7 +14,9 @@ import {
 const deviceConnected = new Map;
 const deviceHashSeed = Math.random() * 0xFFFFFFFF >>> 0;
 
-const router = new KoaRouter;
+const router = new KoaRouter({
+    prefix: config.server.prefix,
+});
 
 router.get('/push', async (/** @type {koaWebsocket.MiddlewareContext<Koa.DefaultState>} */ ctx) => {
     if (config.server.auth) {
@@ -25,11 +27,20 @@ router.get('/push', async (/** @type {koaWebsocket.MiddlewareContext<Koa.Default
                 data: {},
             }), resolve));
             ctx.websocket.close();
+            const remoteAddress = ctx.request.header['x-real-ip']
+                ?? ctx.request.header['x-forwarded-for']?.split(',').pop()?.trim()
+                ?? ctx.req.socket.remoteAddress;
+
+            console.log(new Date().toISOString(), '-', remoteAddress, "auth failed: ", ctx.query.auth);
             return;
         }
     }
 
-    const deviceParsed = uaParser(ctx.get('user-agent'));
+    ctx.websocket.room = ctx.query.room || '';
+
+    ctx.app.ws.server.clients.add(ctx.websocket);
+
+    const deviceParsed = UAParser(ctx.get('user-agent'));
     const deviceId = murmurHash(ctx.request.ip + ctx.get('user-agent'), deviceHashSeed);
     const deviceMeta = {
         type: (deviceParsed.device.type || '').trim(),
@@ -60,6 +71,7 @@ router.get('/push', async (/** @type {koaWebsocket.MiddlewareContext<Koa.Default
             },
         }));
         deviceConnected.delete(deviceId);
+        ctx.app.ws.server.clients.delete(ctx.websocket);
     });
 
     await new Promise(resolve => ctx.websocket.send(JSON.stringify({
@@ -71,10 +83,10 @@ router.get('/push', async (/** @type {koaWebsocket.MiddlewareContext<Koa.Default
         },
     }), resolve));
 
-    messageQueue.queue.reduce(
-        (acc, cur) => acc.then(() => new Promise(resolve => ctx.websocket.send(JSON.stringify(cur), resolve))),
-        Promise.resolve()
-    );
+    ctx.websocket.send(JSON.stringify({
+        event: 'receiveMulti',
+        data: messageQueue.queue.filter(e => e.data.room === ctx.query.room).map(e => e.data),
+    }));
 });
 
 export default router;
